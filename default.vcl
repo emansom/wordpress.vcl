@@ -66,8 +66,14 @@ sub purge_page {
     ban("obj.http.X-Req-URL-Base == " + req.url + " && obj.http.X-Req-Host == " + req.http.host);
 }
 
-# This function is used when a request is send by a HTTP client (Browser)
 sub vcl_recv {
+    # Called at the beginning of a request, after the complete request has been received and parsed.
+    # Its purpose is to decide whether or not to serve the request, how to do it, and, if applicable,
+    # which backend to use.
+    # also used to modify the request
+
+    set req.backend_hint = vdir.backend(); # send all traffic to the vdir director
+
     # Normalize the header, remove the port (in case you're testing this on various TCP ports)
     set req.http.Host = regsub(req.http.Host, ":[0-9]+", "");
 
@@ -75,14 +81,17 @@ sub vcl_recv {
     unset req.http.proxy;
 
     # Normalize the query arguments
-    set req.url = std.querysort(req.url);
+    # Disabled for now. This breaks css and js loaders and some plugins in Wordpress
+    #set req.url = std.querysort(req.url);
 
     # Allow purging
     if (req.method == "PURGE") {
-        if (client.ip !~ purge) {
-            return(synth(405, "Not allowed."));
+        if (!client.ip ~ purge) { # purge is the ACL defined at the begining
+            # Not from an allowed IP? Then die with an error.
+            return (synth(405, "This IP is not allowed to send PURGE requests."));
         }
 
+        # If you got this stage (and didn't error out above), purge the cached result
         if (req.http.X-Purge-Method) {
             if (req.http.X-Purge-Method ~ "(?i)regex") {
                 call purge_regex;
@@ -129,6 +138,15 @@ sub vcl_recv {
         return (pass);
     }
 
+    # Some generic URL manipulation, useful for all templates that follow
+    # First remove the Google Analytics added parameters, useless for our backend
+    if (req.url ~ "(\?|&)(utm_source|utm_medium|utm_campaign|utm_content|gclid|cx|ie|cof|siteurl)=") {
+        set req.url = regsuball(req.url, "&(utm_source|utm_medium|utm_campaign|utm_content|gclid|cx|ie|cof|siteurl)=([A-z0-9_\-\.%25]+)", "");
+        set req.url = regsuball(req.url, "\?(utm_source|utm_medium|utm_campaign|utm_content|gclid|cx|ie|cof|siteurl)=([A-z0-9_\-\.%25]+)", "?");
+        set req.url = regsub(req.url, "\?&", "?");
+        set req.url = regsub(req.url, "\?$", "");
+    }
+
     # Strip hash, server doesn't need it.
     if (req.url ~ "\#") {
         set req.url = regsub(req.url, "\#.*$", "");
@@ -139,13 +157,48 @@ sub vcl_recv {
         set req.url = regsub(req.url, "\?$", "");
     }
 
-	# admin users always miss the cache
-	if( req.url ~ "^/wp-(login|admin)" || req.http.Cookie ~ "wordpress_logged_in_" ){
-		return (pass);
-	}
+    # Some generic cookie manipulation, useful for all templates that follow
+    # Remove the "has_js" cookie
+    set req.http.Cookie = regsuball(req.http.Cookie, "has_js=[^;]+(; )?", "");
 
-	# ignore any other cookies
-	unset req.http.Cookie;
+    # Remove any Google Analytics based cookies
+    set req.http.Cookie = regsuball(req.http.Cookie, "__utm.=[^;]+(; )?", "");
+    set req.http.Cookie = regsuball(req.http.Cookie, "_ga=[^;]+(; )?", "");
+    set req.http.Cookie = regsuball(req.http.Cookie, "_gat=[^;]+(; )?", "");
+    set req.http.Cookie = regsuball(req.http.Cookie, "utmctr=[^;]+(; )?", "");
+    set req.http.Cookie = regsuball(req.http.Cookie, "utmcmd.=[^;]+(; )?", "");
+    set req.http.Cookie = regsuball(req.http.Cookie, "utmccn.=[^;]+(; )?", "");
+	#set req.http.Cookie = regsuball(req.http.Cookie, "_.+?=[^;]+(; )?", "");
+	#set req.http.Cookie = regsuball(req.http.Cookie, "__.+?=[^;]+(; )?", "");
+	set req.http.Cookie = regsuball(req.http.Cookie, "(^|;\s*)(_[_a-z]+|has_js)=[^;]*", "");
+
+	# Remove Google Analytics Dashboard for Wordpress cookies
+	set req.http.Cookie = regsuball(req.http.Cookie, "gadwp.+?=[^;]+(; )?", "");
+
+    # Remove DoubleClick offensive cookies
+    set req.http.Cookie = regsuball(req.http.Cookie, "__gads=[^;]+(; )?", "");
+
+    # Remove the Quant Capital cookies (added by some plugin, all __qca)
+    set req.http.Cookie = regsuball(req.http.Cookie, "__qc.=[^;]+(; )?", "");
+
+    # Remove the AddThis cookies
+    set req.http.Cookie = regsuball(req.http.Cookie, "__atuv.=[^;]+(; )?", "");
+
+    # Remove several Wordpress-specific cookies
+    set req.http.Cookie = regsuball(req.http.Cookie, "wp-settings-1=[^;]+(; )?", "");
+    set req.http.Cookie = regsuball(req.http.Cookie, "wp-settings-time-1=[^;]+(; )?", "");
+    set req.http.Cookie = regsuball(req.http.Cookie, "wordpress_test_cookie=[^;]+(; )?", "");
+
+    # Remove a ";" prefix in the cookie if present
+    set req.http.Cookie = regsuball(req.http.Cookie, "^;\s*", "");
+
+    # Are there cookies left with only spaces or that are empty?
+    if (req.http.cookie ~ "^\s*$") {
+        unset req.http.cookie;
+    }
+
+	## ignore any other cookies
+	#unset req.http.Cookie;
 
     if (req.http.Cache-Control ~ "(?i)no-cache") {
         if (client.ip ~ purge) {
@@ -158,36 +211,58 @@ sub vcl_recv {
         }
     }
 
+    # Large static files are delivered directly to the end-user without
+    # waiting for Varnish to fully read the file first.
+    # Varnish 4 fully supports Streaming, so set do_stream in vcl_backend_response()
+    if (req.url ~ "^[^?]*\.(7z|avi|bz2|flac|flv|gz|mka|mkv|mov|mp3|mp4|mpeg|mpg|ogg|ogm|opus|rar|tar|tgz|tbz|txz|wav|webm|xz|zip)(\?.*)?$") {
+        unset req.http.Cookie;
+        return (hash);
+    }
+
+    # Remove all cookies for static files
+    # A valid discussion could be held on this line: do you really need to cache static files that don't cause load? Only if you have memory left.
+    # Sure, there's disk I/O, but chances are your OS will already have these files in their buffers (thus memory).
+    # Before you blindly enable this, have a read here: https://ma.ttias.be/stop-caching-static-files/
+    if (req.url ~ "^[^?]*\.(7z|avi|bmp|bz2|css|csv|doc|docx|eot|flac|flv|gif|gz|ico|jpeg|jpg|js|less|mka|mkv|mov|mp3|mp4|mpeg|mpg|odt|otf|ogg|ogm|opus|pdf|png|ppt|pptx|rar|rtf|svg|svgz|swf|tar|tbz|tgz|ttf|txt|txz|wav|webm|webp|woff|woff2|xls|xlsx|xml|xz|zip)(\?.*)?$") {
+        unset req.http.Cookie;
+        return (hash);
+    }
+
+    # Send Surrogate-Capability headers to announce ESI support to backend
+    set req.http.Surrogate-Capability = "key=ESI/1.0";
+
     set req.http.X-Forwarded-For = req.http.X-Forwarded-For + ", " + client.ip;
 
-  	# TODO: limit this to specific paths to lower possible attack vector
-  	if (req.http.Authorization) {
-  		return (pass);
-  	}
+    # admin users always miss the cache
+    if (req.url ~ "^/wp-(login|admin)" || req.http.Cookie ~ "wordpress_logged_in_" ) {
+        return (pass);
+    }
 
-  	# Cache the following files extensions
-  	# TODO: more static file extensions
-  	if (req.url ~ "\.(css|js|png|gif|jp(e)?g|swf|ico)") {
-  		unset req.http.cookie;
-  	}
+    # Don't cache wordpress-specific items
+    if (req.http.Cookie ~ "wordpress_" || req.http.Cookie ~ "comment_") {
+        return (pass);
+    }
 
-  	# Normalize Accept-Encoding header and compression
-  	# https://www.varnish-cache.org/docs/3.0/tutorial/vary.html
-  	if (req.http.Accept-Encoding) {
-  		# Do no compress compressed files...
-  		if (req.url ~ "\.(jpg|png|gif|gz|tgz|bz2|tbz|mp3|ogg)$") {
-  			   	unset req.http.Accept-Encoding;
-  		} elsif (req.http.Accept-Encoding ~ "gzip") {
-  		    	set req.http.Accept-Encoding = "gzip";
-  		} elsif (req.http.Accept-Encoding ~ "deflate") {
-  		    	set req.http.Accept-Encoding = "deflate";
-  		} else {
-  			unset req.http.Accept-Encoding;
-  		}
-  	}
+    if (req.url ~ "(edit\.php)") {
+        return(pass);
+    }
+
+    if (req.url ~ "/wp-cron.php" || req.url ~ "preview=true" || req.url ~ "xmlrpc.php") {
+        return (pass);
+    }
+
+     # Don't cache WooCommerce
+    if (req.url ~ "/(cart|my-account|checkout|addons|/?add-to-cart=)") {
+        return (pass);
+    }
+
+    # Don't cache searchs
+    if (req.url ~ "\?s=") {
+        return (pass);
+    }
 
   	# Did not cache HTTP authentication and HTTP Cookie
-  	if (req.http.Authorization) {
+    if (req.http.Authorization) {
   		# Not cacheable by default
   		return (pass);
   	}
@@ -331,13 +406,13 @@ sub vcl_backend_response {
 
   if (bereq.url ~ "wp-(login|admin)" || bereq.url ~ "preview=true") {
     set beresp.uncacheable = true;
-    set beresp.ttl = 120s;
+    #set beresp.ttl = 120s;
     return (deliver);
   }
 
-  if (!(bereq.url ~ "(wp-login|wp-admin|preview=true)")) {
-    unset beresp.http.set-cookie;
-  }
+  #if (!(bereq.url ~ "(wp-login|wp-admin|preview=true)")) {
+  #  unset beresp.http.set-cookie;
+  #}
 
   # Sometimes, a 301 or 302 redirect formed via Apache's mod_rewrite can mess with the HTTP port that is being passed along.
   # This often happens with simple rewrite rules in a scenario where Varnish runs on :80 and Apache on :8080 on the same box.
@@ -351,7 +426,7 @@ sub vcl_backend_response {
 
   # Set 2min cache if unset for static files
   if (beresp.ttl <= 0s || beresp.http.Set-Cookie || beresp.http.Vary == "*") {
-    set beresp.ttl = 120s; # Important, you shouldn't rely on this, SET YOUR HEADERS in the backend
+    #set beresp.ttl = 120s; # Important, you shouldn't rely on this, SET YOUR HEADERS in the backend
     set beresp.uncacheable = true;
     return (deliver);
   }
@@ -360,6 +435,9 @@ sub vcl_backend_response {
   if (beresp.status == 500 || beresp.status == 502 || beresp.status == 503 || beresp.status == 504) {
     return (abandon);
   }
+
+  # Default TTL
+  set beresp.ttl = 24h;
 
   # Allow stale content, in case the backend goes down.
   # make Varnish keep all objects for 6 hours beyond their TTL
@@ -397,9 +475,6 @@ sub vcl_deliver {
   unset resp.http.Via;
   unset resp.http.Link;
   unset resp.http.X-Generator;
-
-  # Don't trust browser and forwarding caches
-  unset resp.http.Cache-Control;
 
   return (deliver);
 }
