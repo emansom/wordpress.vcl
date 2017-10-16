@@ -234,7 +234,7 @@ sub vcl_recv {
     set req.http.X-Forwarded-For = req.http.X-Forwarded-For + ", " + client.ip;
 
     # admin users always miss the cache
-    if (req.url ~ "^/wp-(login|admin)" || req.http.Cookie ~ "wordpress_logged_in_" ) {
+    if (req.url ~ "^/wp-(login|admin)" || req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
         return (pass);
     }
 
@@ -266,6 +266,11 @@ sub vcl_recv {
   		# Not cacheable by default
   		return (pass);
   	}
+
+	# If there's still a cookie left, just to be sure, do not cache
+	if (req.http.Cookie) {
+		return (pass);
+	}
 
     return (hash);
 }
@@ -428,6 +433,7 @@ sub vcl_backend_response {
   if (beresp.ttl <= 0s || beresp.http.Set-Cookie || beresp.http.Vary == "*") {
     #set beresp.ttl = 120s; # Important, you shouldn't rely on this, SET YOUR HEADERS in the backend
     set beresp.uncacheable = true;
+    set beresp.http.X-Cacheable = "NO:Not Cacheable";
     return (deliver);
   }
 
@@ -436,12 +442,27 @@ sub vcl_backend_response {
     return (abandon);
   }
 
+  if (beresp.http.Cache-Control ~ "private") {
+    set beresp.uncacheable = true;
+    set beresp.http.X-Cacheable = "NO:Cache-Control=private";
+    return (deliver);
+  }
+
+  #if (req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
+  #  set beresp.uncacheable = true;
+  #  set beresp.http.X-Cacheable = "NO:Got Session";
+  #  return (deliver);
+  #}
+
   # Default TTL
   set beresp.ttl = 24h;
 
   # Allow stale content, in case the backend goes down.
   # make Varnish keep all objects for 6 hours beyond their TTL
   set beresp.grace = 6h;
+
+  # Object was cacheable
+  set beresp.http.X-Cacheable = "YES";
 
   return (deliver);
 }
