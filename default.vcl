@@ -412,7 +412,6 @@ sub vcl_backend_response {
   if (bereq.url ~ "wp-(login|admin)" || bereq.url ~ "preview=true") {
     set beresp.uncacheable = true;
     #set beresp.ttl = 120s;
-    return (deliver);
   }
 
   #if (!(bereq.url ~ "(wp-login|wp-admin|preview=true)")) {
