@@ -86,7 +86,9 @@ sub vcl_recv {
 
     # Allow purging
     if (req.method == "PURGE") {
-        if (!client.ip ~ purge) { # purge is the ACL defined at the begining
+        if (!client.ip ~ purge) {
+        # Use std.ip if behind TLS terminator and/or load-balancer
+        #if (!std.ip(req.http.X-forwarded-for, "0.0.0.0") ~ purge) { # purge is the ACL defined at the begining
             # Not from an allowed IP? Then die with an error.
             return (synth(405, "This IP is not allowed to send PURGE requests."));
         }
@@ -202,6 +204,8 @@ sub vcl_recv {
 
     if (req.http.Cache-Control ~ "(?i)no-cache") {
         if (client.ip ~ purge) {
+        # Use std.ip if behind TLS terminator and/or load-balancer
+        #if (std.ip(req.http.X-forwarded-for, "0.0.0.0") ~ purge) {
             # Ignore requests via proxy caches and badly behaved crawlers
             # like msnbot that send no-cache with every request.
             if (! (req.http.Via || req.http.User-Agent ~ "(?i)bot" || req.http.X-Purge)) {
@@ -211,12 +215,16 @@ sub vcl_recv {
         }
     }
 
+	# Alllow serving from the cache even if the client has requested that the document not be served from the cache. This might result in stale content being served.
+	unset req.http.Cache-Control;
+	unset req.http.Pragma;
+
     # Large static files are delivered directly to the end-user without
     # waiting for Varnish to fully read the file first.
     # Varnish 4 fully supports Streaming, so set do_stream in vcl_backend_response()
     if (req.url ~ "^[^?]*\.(7z|avi|bz2|flac|flv|gz|mka|mkv|mov|mp3|mp4|mpeg|mpg|ogg|ogm|opus|rar|tar|tgz|tbz|txz|wav|webm|xz|zip)(\?.*)?$") {
         unset req.http.Cookie;
-        return (hash);
+        return (pass);
     }
 
     # Remove all cookies for static files
@@ -225,7 +233,7 @@ sub vcl_recv {
     # Before you blindly enable this, have a read here: https://ma.ttias.be/stop-caching-static-files/
     if (req.url ~ "^[^?]*\.(7z|avi|bmp|bz2|css|csv|doc|docx|eot|flac|flv|gif|gz|ico|jpeg|jpg|js|less|mka|mkv|mov|mp3|mp4|mpeg|mpg|odt|otf|ogg|ogm|opus|pdf|png|ppt|pptx|rar|rtf|svg|svgz|swf|tar|tbz|tgz|ttf|txt|txz|wav|webm|webp|woff|woff2|xls|xlsx|xml|xz|zip)(\?.*)?$") {
         unset req.http.Cookie;
-        return (hash);
+        return (pass);
     }
 
     # Send Surrogate-Capability headers to announce ESI support to backend
@@ -234,7 +242,7 @@ sub vcl_recv {
     set req.http.X-Forwarded-For = req.http.X-Forwarded-For + ", " + client.ip;
 
     # admin users always miss the cache
-    if (req.url ~ "^/wp-(login|admin)" || req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
+    if (req.url ~ "^/wp-(login|admin)" || req.url ~ "^/veilig-inloggen" || req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|comment_author|PHPSESSID") {
         return (pass);
     }
 
@@ -409,14 +417,10 @@ sub vcl_backend_response {
 	set beresp.uncacheable = true;
   }
 
-  if (bereq.url ~ "wp-(login|admin)" || bereq.url ~ "preview=true") {
+  if (bereq.url ~ "wp-(login|admin)" || bereg.url ~ "veilig-inloggen" || bereq.url ~ "preview=true") {
     set beresp.uncacheable = true;
     #set beresp.ttl = 120s;
   }
-
-  #if (!(bereq.url ~ "(wp-login|wp-admin|preview=true)")) {
-  #  unset beresp.http.set-cookie;
-  #}
 
   # Sometimes, a 301 or 302 redirect formed via Apache's mod_rewrite can mess with the HTTP port that is being passed along.
   # This often happens with simple rewrite rules in a scenario where Varnish runs on :80 and Apache on :8080 on the same box.
