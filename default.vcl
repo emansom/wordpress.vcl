@@ -193,7 +193,7 @@ sub vcl_recv {
 
     # Remove cookies from the jetpack plugin if not logged in and not on /wp-admin or /wp-login.php
     if (!req.url ~ "^/wp-(login|admin)" || !req.url ~ "^/veilig-inloggen" || !req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|PHPSESSID") {
-		set req.http.Cookie = regsuball(req.http.Cookie, "jetpack.+?=[^;]+(; )?", "")
+		set req.http.Cookie = regsuball(req.http.Cookie, "jetpack.+?=[^;]+(; )?", "");
     }
 
     # Remove a ";" prefix in the cookie if present
