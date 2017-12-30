@@ -191,6 +191,11 @@ sub vcl_recv {
     set req.http.Cookie = regsuball(req.http.Cookie, "wp-settings-time-\d+=[^;]+(; )?", "");
     set req.http.Cookie = regsuball(req.http.Cookie, "wordpress_test_cookie=[^;]+(; )?", "");
 
+    # Remove cookies from the jetpack plugin if not logged in and not on /wp-admin or /wp-login.php
+    if (!req.url ~ "^/wp-(login|admin)" || !req.url ~ "^/veilig-inloggen" || !req.http.Cookie ~ "wp-postpass_|wordpress_logged_in_|PHPSESSID") {
+		set req.http.Cookie = regsuball(req.http.Cookie, "jetpack.+?=[^;]+(; )?", "")
+    }
+
     # Remove a ";" prefix in the cookie if present
     set req.http.Cookie = regsuball(req.http.Cookie, "^;\s*", "");
 
